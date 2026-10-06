@@ -1,5 +1,5 @@
 const express = require('express');
-const Database = require('better-sqlite3');
+const { createClient } = require('@libsql/client');
 const crypto = require('crypto');
 const path = require('path');
 
@@ -7,16 +7,22 @@ const PASSWORD = process.env.INBOX_PASSWORD || 'changeme';
 const PORT = process.env.PORT || 3000;
 
 const app = express();
-app.set('trust proxy', true); // so req.ip works behind Render/Railway/Cloudflare etc.
+app.set('trust proxy', true);
 app.use(express.json({ limit: '10kb' }));
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(__dirname, 'public'))); // local dev; Vercel serves /public itself
 
-const db = new Database('messages.db');
-db.exec(`CREATE TABLE IF NOT EXISTS messages (
+// Turso in production, a local file when running on your PC
+const db = createClient({
+  url: process.env.TURSO_DATABASE_URL || 'file:messages.db',
+  authToken: process.env.TURSO_AUTH_TOKEN,
+});
+
+const ready = db.execute(`CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   text TEXT, ip TEXT, ua TEXT, device TEXT, lang TEXT, screen TEXT, tz TEXT, tag TEXT,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP
 )`);
+ready.catch(e => console.error('DB init failed:', e.message));
 
 // ---------- helpers ----------
 function parseUA(ua = '') {
@@ -43,23 +49,10 @@ function parseUA(ua = '') {
   return [model, os, browser].filter(Boolean).join(' / ');
 }
 
-function cleanIp(ip = '') {
-  return ip.replace('::ffff:', '');
-}
+const cleanIp = (ip = '') => ip.replace('::ffff:', '');
 
-function esc(s = '') {
-  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-}
-
-// simple in-memory rate limit: 5 messages/minute per IP
-const hits = new Map();
-function rateLimited(ip) {
-  const now = Date.now();
-  const recent = (hits.get(ip) || []).filter(t => now - t < 60000);
-  recent.push(now);
-  hits.set(ip, recent);
-  return recent.length > 5;
-}
+const esc = (s = '') =>
+  String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 function auth(req, res, next) {
   const header = req.headers.authorization || '';
@@ -74,33 +67,49 @@ function auth(req, res, next) {
 }
 
 // ---------- routes ----------
-app.post('/send', (req, res) => {
-  const ip = cleanIp(req.ip);
-  if (rateLimited(ip)) return res.status(429).json({ error: 'Too many messages, slow down.' });
+app.post('/send', async (req, res) => {
+  try {
+    await ready;
+    const ip = cleanIp(req.ip);
 
-  const text = String(req.body.text || '').trim().slice(0, 1000);
-  if (!text) return res.status(400).json({ error: 'Write something first.' });
+    // rate limit: max 5 messages per minute per IP (stored in the DB, so it works on serverless)
+    const recent = await db.execute({
+      sql: `SELECT COUNT(*) AS n FROM messages WHERE ip = ? AND created_at > datetime('now','-1 minute')`,
+      args: [ip],
+    });
+    if (Number(recent.rows[0].n) >= 5) return res.status(429).json({ error: 'Too many messages, slow down.' });
 
-  const ua = req.headers['user-agent'] || '';
-  const lang = String(req.body.lang || req.headers['accept-language'] || '').slice(0, 40);
-  const screen = String(req.body.screen || '').slice(0, 20);
-  const tz = String(req.body.tz || '').slice(0, 40);
+    const text = String(req.body.text || '').trim().slice(0, 1000);
+    if (!text) return res.status(400).json({ error: 'Write something first.' });
 
-  // "Sender ID": same IP + device + screen + timezone + language => same tag
-  const tag = crypto.createHash('sha256').update([ip, ua, screen, tz, lang].join('|')).digest('hex').slice(0, 6);
+    const ua = req.headers['user-agent'] || '';
+    const lang = String(req.body.lang || req.headers['accept-language'] || '').slice(0, 40);
+    const screen = String(req.body.screen || '').slice(0, 20);
+    const tz = String(req.body.tz || '').slice(0, 40);
 
-  db.prepare(`INSERT INTO messages (text, ip, ua, device, lang, screen, tz, tag) VALUES (?,?,?,?,?,?,?,?)`)
-    .run(text, ip, ua, parseUA(ua), lang, screen, tz, tag);
+    // "Sender ID": same IP + device + screen + timezone + language => same tag
+    const tag = crypto.createHash('sha256').update([ip, ua, screen, tz, lang].join('|')).digest('hex').slice(0, 6);
 
-  res.json({ ok: true });
+    await db.execute({
+      sql: `INSERT INTO messages (text, ip, ua, device, lang, screen, tz, tag) VALUES (?,?,?,?,?,?,?,?)`,
+      args: [text, ip, ua, parseUA(ua), lang, screen, tz, tag],
+    });
+
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Server error, try again.' });
+  }
 });
 
-app.get('/inbox', auth, (req, res) => {
-  const rows = db.prepare('SELECT * FROM messages ORDER BY id DESC').all();
-  const counts = {};
-  rows.forEach(r => (counts[r.tag] = (counts[r.tag] || 0) + 1));
+app.get('/inbox', auth, async (req, res) => {
+  try {
+    await ready;
+    const rows = (await db.execute('SELECT * FROM messages ORDER BY id DESC')).rows;
+    const counts = {};
+    rows.forEach(r => (counts[r.tag] = (counts[r.tag] || 0) + 1));
 
-  const cards = rows.map(r => `
+    const cards = rows.map(r => `
     <div class="card">
       <p class="msg">${esc(r.text)}</p>
       <div class="meta">
@@ -112,7 +121,7 @@ app.get('/inbox', auth, (req, res) => {
       </div>
     </div>`).join('');
 
-  res.send(`<!doctype html><html><head><meta charset="utf-8">
+    res.send(`<!doctype html><html><head><meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1"><title>Inbox</title>
   <style>
     body{font-family:system-ui,sans-serif;background:#111;color:#eee;max-width:640px;margin:0 auto;padding:16px}
@@ -122,6 +131,15 @@ app.get('/inbox', auth, (req, res) => {
     .tag{color:#ff6b9d;font-weight:600}
   </style></head><body>
   <h1>Inbox (${rows.length})</h1>${cards || '<p>No messages yet.</p>'}</body></html>`);
+  } catch (e) {
+    console.error(e);
+    res.status(500).send('Could not load messages.');
+  }
 });
 
-app.listen(PORT, () => console.log(`Running on http://localhost:${PORT}  (inbox: /inbox)`));
+// run a normal server locally; on Vercel the app is exported instead
+if (require.main === module) {
+  app.listen(PORT, () => console.log(`Running on http://localhost:${PORT}  (inbox: /inbox)`));
+}
+
+module.exports = app;
