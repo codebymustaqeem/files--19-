@@ -1,0 +1,49 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Send me a message</title>
+  <style>
+    body{font-family:system-ui,sans-serif;background:linear-gradient(160deg,#ff6b9d,#ff9a56);min-height:100vh;margin:0;display:flex;align-items:center;justify-content:center}
+    .box{background:#fff;border-radius:20px;padding:24px;width:min(92vw,420px);box-shadow:0 10px 40px rgba(0,0,0,.2)}
+    h2{margin:0 0 12px}
+    textarea{width:100%;height:120px;border:2px solid #eee;border-radius:12px;padding:12px;font-size:16px;box-sizing:border-box;resize:none}
+    button{width:100%;margin-top:12px;padding:14px;border:0;border-radius:12px;background:#111;color:#fff;font-size:16px;font-weight:600}
+    #status{margin-top:10px;text-align:center;font-size:14px}
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h2>Send me a message 💬</h2>
+    <textarea id="text" maxlength="1000" placeholder="Write something..."></textarea>
+    <button id="btn">Send</button>
+    <div id="status"></div>
+  </div>
+  <script>
+    const btn = document.getElementById('btn');
+    const status = document.getElementById('status');
+    btn.onclick = async () => {
+      const text = document.getElementById('text').value.trim();
+      if (!text) { status.textContent = 'Write something first.'; return; }
+      btn.disabled = true;
+      try {
+        const res = await fetch('/send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text,
+            screen: screen.width + 'x' + screen.height,
+            tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+            lang: navigator.language
+          })
+        });
+        const data = await res.json();
+        if (data.ok) { status.textContent = 'Sent! ✅'; document.getElementById('text').value = ''; }
+        else status.textContent = data.error || 'Something went wrong.';
+      } catch (e) { status.textContent = 'Network error.'; }
+      btn.disabled = false;
+    };
+  </script>
+</body>
+</html>

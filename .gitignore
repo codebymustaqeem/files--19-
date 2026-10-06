@@ -1,0 +1,6 @@
+node_modules/
+messages.db
+messages.db-journal
+messages.db-wal
+messages.db-shm
+.env
