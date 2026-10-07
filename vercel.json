@@ -1,6 +1,6 @@
 {
   "rewrites": [
-    { "source": "/send", "destination": "/api/index" },
-    { "source": "/inbox", "destination": "/api/index" }
+    { "source": "/send", "destination": "/api/send" },
+    { "source": "/inbox", "destination": "/api/inbox" }
   ]
 }

@@ -67,7 +67,7 @@ function auth(req, res, next) {
 }
 
 // ---------- routes ----------
-app.post('/send', async (req, res) => {
+app.post(['/send', '/api/send'], async (req, res) => {
   try {
     await ready;
     const ip = cleanIp(req.ip);
@@ -102,7 +102,7 @@ app.post('/send', async (req, res) => {
   }
 });
 
-app.get('/inbox', auth, async (req, res) => {
+app.get(['/inbox', '/api/inbox'], auth, async (req, res) => {
   try {
     await ready;
     const rows = (await db.execute('SELECT * FROM messages ORDER BY id DESC')).rows;
